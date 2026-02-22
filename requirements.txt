@@ -1,0 +1,24 @@
+python-dotenv
+
+# LangChain / LangGraph core
+langchain
+langchain-core
+langchain-groq
+langgraph
+langsmith
+
+# Exercise 2/3/4 retrieval + utils
+scikit-learn
+numpy
+typing-extensions
+
+# Project 1 UI
+chainlit
+
+# Project 1 tools (web + DB)
+ddgs
+tavily-python
+psycopg2-binary
+
+# Optional (only for real chart rendering in app_chainlit.py)
+plotly

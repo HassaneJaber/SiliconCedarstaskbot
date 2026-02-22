@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# SQLite / checkpoints
+*.db
+*.sqlite
+
+# Chainlit generated (optional cleanup)
+.chainlit/translations/
