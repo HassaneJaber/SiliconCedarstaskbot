@@ -1,3 +1,5 @@
+# project1/agents/rag_agent.py
+
 import glob
 import os
 from pathlib import Path
@@ -19,7 +21,8 @@ RAG_SYSTEM = (
 BASE_DIR = Path(__file__).resolve().parents[2]  # .../agentic-ai
 DOCS_DIR = Path(os.getenv("DOCS_DIR", str(BASE_DIR / "docs")))
 TOP_K = int(os.getenv("RAG_TOP_K", "4"))
-THRESHOLD = float(os.getenv("RAG_THRESHOLD", "0.12"))
+THRESHOLD = float(os.getenv("RAG_THRESHOLD", "0.06"))
+
 
 class TfidfStore:
     def __init__(self, docs_dir: Path):
@@ -32,8 +35,9 @@ class TfidfStore:
     def build(self):
         self.docs_dir.mkdir(parents=True, exist_ok=True)
         files = sorted(glob.glob(str(self.docs_dir / "*.txt")))
+
         if not files:
-            # create fallback kb.txt
+        # create fallback kb.txt
             fallback = self.docs_dir / "kb.txt"
             fallback.write_text(
                 "LangGraph is a framework for building stateful LLM workflows as graphs.\n"
@@ -43,15 +47,20 @@ class TfidfStore:
             files = [str(fallback)]
 
         texts, sources = [], []
+
         for p in files:
-            t = Path(p).read_text(encoding="utf-8", errors="ignore").strip()
-            if t:
-                texts.append(t)
-                sources.append(Path(p).name)
+            path = Path(p)
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+
+        # ✅ index each non-empty line as its own chunk
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            for idx, line in enumerate(lines, start=1):
+                texts.append(line)
+                sources.append(f"{path.name}:L{idx}")
 
         self.texts = texts
         self.sources = sources
-        self.X = self.vectorizer.fit_transform(self.texts)
+        self.X = self.vectorizer.fit_transform(self.texts) if self.texts else None
 
     def retrieve(self, query: str, k: int) -> Tuple[str, float, str]:
         if not self.texts or self.X is None:
@@ -65,16 +74,53 @@ class TfidfStore:
         srcs = sorted(set(self.sources[i] for i in top_idx if i < len(self.sources)))
         return "\n\n---\n\n".join(ctx_parts), top_score, ", ".join(srcs)
 
+
+def _is_explicit_doc_request(low: str) -> bool:
+    """
+    If the user explicitly asks for docs-based answering, RAG should stay strict.
+    Otherwise, if RAG cannot answer, we can hand off to conversation.
+    """
+    return any(
+        x in low
+        for x in [
+            "based on the docs",
+            "according to the docs",
+            "according to the document",
+            "from the docs",
+            "from the documents",
+            "docs/kb",
+            "internal docs",
+            "use the docs",
+            "use the document",
+            "what docs",
+            "list docs",
+            "show docs",
+            "which documents",
+            "files in docs",
+        ]
+    )
+
+
 _STORE = TfidfStore(DOCS_DIR)
 _STORE.build()
 
+
 def rag_node(state: SupervisorState) -> dict:
-    llm = get_llm(temperature=0.0)
     user_msg = state["messages"][-1].content.strip()
     low = user_msg.lower()
 
     # ✅ Deterministic "list docs" behavior
-    if any(x in low for x in ["what docs", "list docs", "what is in my docs", "show docs", "which documents", "files in docs"]):
+    if any(
+        x in low
+        for x in [
+            "what docs",
+            "list docs",
+            "what is in my docs",
+            "show docs",
+            "which documents",
+            "files in docs",
+        ]
+    ):
         try:
             names = sorted([p.name for p in DOCS_DIR.glob("*.txt")])
             if not names:
@@ -85,6 +131,7 @@ def rag_node(state: SupervisorState) -> dict:
                 "messages": [AIMessage(content=answer)],
                 "last_agent": "rag",
                 "rag_sources": ", ".join(names),
+                "handoff_to": "",
                 "error": "",
             }
         except Exception:
@@ -92,27 +139,51 @@ def rag_node(state: SupervisorState) -> dict:
                 "messages": [AIMessage(content="I couldn't read the docs folder.")],
                 "last_agent": "rag",
                 "rag_sources": "",
+                "handoff_to": "",
                 "error": "",
             }
 
-    # Normal RAG
+    # Normal RAG retrieval
     context, score, sources = _STORE.retrieve(user_msg, k=TOP_K)
 
+    # ✅ IMPORTANT FIX:
+    # If RAG cannot answer, do NOT call the LLM at all (prevents hallucinations).
     if (not context.strip()) or (score < THRESHOLD):
+        if _is_explicit_doc_request(low):
+            return {
+                "messages": [AIMessage(content="I don't know based on the provided context.")],
+                "last_agent": "rag",
+                "rag_sources": sources,
+                "handoff_to": "",
+                "error": "",
+            }
+
+        # Dynamic supervisor behavior: let conversation take over
         return {
-            "messages": [AIMessage(content="I don't know based on the provided context.")],
             "last_agent": "rag",
             "rag_sources": sources,
+            "handoff_to": "conversation",
             "error": "",
         }
 
-    out = llm.invoke([
-        SystemMessage(content=RAG_SYSTEM),
-        SystemMessage(content=f"CONTEXT:\n{context}")
-    ] + state.get("messages", [])[-6:])
+    # Only here do we call the LLM (because we have good-enough context)
+    llm = get_llm(temperature=0.0)
+    out = llm.invoke(
+        [
+            SystemMessage(content=RAG_SYSTEM),
+            SystemMessage(content=f"CONTEXT:\n{context}"),
+        ]
+        + state.get("messages", [])[-6:]
+    )
 
     content = (out.content or "").strip()
     if not content:
         content = "I don't know based on the provided context."
 
-    return {"messages": [AIMessage(content=content)], "last_agent": "rag", "rag_sources": sources, "error": ""}
+    return {
+        "messages": [AIMessage(content=content)],
+        "last_agent": "rag",
+        "rag_sources": sources,
+        "handoff_to": "",
+        "error": "",
+    }

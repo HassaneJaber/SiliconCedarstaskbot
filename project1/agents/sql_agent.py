@@ -210,6 +210,60 @@ def _pick_label_value(columns: List[Dict[str, Any]], metric_hint: str) -> Tuple[
     return label_col, value_col
 
 
+def _demo_users_sql_from_text(user_text: str) -> Optional[str]:
+    """
+    Deterministic shortcuts so the user can ask normal questions
+    without knowing SQL.
+    """
+    t = (user_text or "").lower()
+
+    if CHART_RE.search(t) and ("age" in t or "ages" in t) and ("user" in t or "demo_users" in t):
+        return "SELECT name AS label, age AS value FROM public.demo_users LIMIT 50"
+
+    if re.search(r"\b(show|list|display|get)\b.*\b(all\s+)?users\b", t) or "who are the users" in t:
+        return "SELECT * FROM public.demo_users LIMIT 50"
+
+    if ("name" in t or "names" in t) and ("age" in t or "ages" in t) and ("user" in t or "demo_users" in t):
+        return "SELECT name, age FROM public.demo_users LIMIT 50"
+
+    if "average age" in t or "avg age" in t or "mean age" in t:
+        return "SELECT ROUND(AVG(age)::numeric, 2) AS average_age FROM public.demo_users"
+
+    if "how many users" in t or "count users" in t or "number of users" in t:
+        return "SELECT COUNT(*) AS user_count FROM public.demo_users"
+
+    if "oldest user" in t or "oldest users" in t:
+        return "SELECT * FROM public.demo_users ORDER BY age DESC LIMIT 1"
+
+    if "youngest user" in t or "youngest users" in t:
+        return "SELECT * FROM public.demo_users ORDER BY age ASC LIMIT 1"
+
+    if "demo_users" in t and any(x in t for x in ["show", "list", "display", "get"]):
+        return "SELECT * FROM public.demo_users LIMIT 50"
+
+    return None
+
+
+def _answer_from_rows(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return "I couldn't find any matching rows."
+
+    if len(rows) == 1:
+        row = rows[0]
+
+        if "user_count" in row:
+            return f"There are {row['user_count']} users."
+
+        if "average_age" in row:
+            return f"The average age is {row['average_age']}."
+
+        if len(row) == 1:
+            only_val = next(iter(row.values()))
+            return f"The answer is {only_val}."
+
+    return "Here are the results:\n\n" + _to_md_table(rows)
+
+
 def sql_node(state: SupervisorState) -> dict:
     user_text = state["messages"][-1].content.strip()
 
@@ -234,12 +288,21 @@ def sql_node(state: SupervisorState) -> dict:
     chart_kind = _chart_kind(user_text)
     metric_hint = _extract_requested_metric(user_text)
 
+    # 1) If the user typed direct SQL, allow it (safe read-only only)
     direct = _first_statement(user_text)
     if _is_safe_sql(direct):
         sql = _ensure_limit(direct, 50)
         auto_viz = False
+
     else:
-        if wants_chart:
+        # 2) Deterministic natural-language shortcuts for demo_users
+        demo_sql = _demo_users_sql_from_text(user_text)
+        if demo_sql:
+            sql = _ensure_limit(demo_sql, 50)
+            auto_viz = wants_chart
+
+        # 3) Chart requests: try to build chart-friendly query
+        elif wants_chart:
             table = _safe_ident(_guess_table_from_text(dsn, user_text))
             sql = ""
 
@@ -274,6 +337,7 @@ LIMIT 50
             sql = _ensure_limit(sql, 50)
             auto_viz = True
 
+        # 4) General natural language -> let the LLM make SQL
         else:
             llm = get_llm(temperature=0.0)
             out = llm.invoke([
@@ -297,13 +361,17 @@ LIMIT 50
 
     try:
         preview_rows = _run_query(dsn, sql, max_rows=50)
-        md = _to_md_table(preview_rows)
-        answer = f"SQL used:\n```sql\n{sql}\n```\nPreview (first rows):\n{md}"
+
+        if auto_viz:
+            # SQL is only preparing data for viz; final answer will come from viz_node
+            answer = "I prepared the data for the chart."
+        else:
+            answer = _answer_from_rows(preview_rows)
 
         return {
             "messages": [AIMessage(content=answer)],
             "last_agent": "sql",
-            "sql_query": sql,
+            "sql_query": sql,          # keep internal only
             "sql_preview": preview_rows,
             "chart_kind": chart_kind,
             "post_route": ("viz" if auto_viz else ""),

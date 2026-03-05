@@ -39,6 +39,42 @@ def _parse_kv_pairs(text: str) -> List[Tuple[str, float]]:
     return pairs
 
 
+def _parse_labels_values(text: str) -> Optional[Tuple[List[str], List[float]]]:
+    """
+    Supports prompts like:
+    - bar chart with labels A, B, C and values 10, 20, 30
+    - labels: A,B,C values: 10,20,30
+    """
+    m = re.search(
+        r"\blabels?\s*(?:=|:)?\s*([A-Za-z0-9_,\s]+?)\s*(?:and\s+)?values?\s*(?:=|:)?\s*([-\d\.,\s]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    raw_labels = m.group(1).strip()
+    raw_values = m.group(2).strip()
+
+    labels = [x.strip() for x in re.split(r"\s*,\s*", raw_labels) if x.strip()]
+    if len(labels) <= 1:
+        labels = [x.strip() for x in re.split(r"\s+", raw_labels) if x.strip()]
+
+    values = []
+    for x in re.split(r"[,\s]+", raw_values):
+        if not x:
+            continue
+        try:
+            values.append(float(x))
+        except Exception:
+            return None
+
+    if len(labels) >= 2 and len(labels) == len(values):
+        return labels, values
+
+    return None
+
+
 def _parse_points_list(text: str) -> Optional[List[float]]:
     m = re.search(r"\b(points|values|data)\s*:\s*([-\d\.\s,]+)", text, re.I)
     if not m:
@@ -148,62 +184,75 @@ def viz_node(state: SupervisorState) -> dict:
             "error": "",
         }
 
-    # 1) Prefer SQL preview in state
-    rows = state.get("sql_preview") or []
-    inferred = _infer_from_rows(rows) if rows else None
-    if inferred:
-        labels, values, ds_label = inferred
-        chart_type = _detect_chart_type(user_text, default_type="bar")
-        cfg = _chart_config(chart_type, labels, values, dataset_label=ds_label)
-        return {
-            "messages": [AIMessage(content="Here is a Chart.js config:\n```json\n" + json.dumps(cfg, indent=2) + "\n```")],
-            "last_agent": "viz",
-            "viz_config": cfg,
-            "error": "",
-        }
+    chart_type = _detect_chart_type(user_text, default_type="bar")
 
-    # 2) Parse A=30, B=70
+    # 1) Direct user-provided key=value pairs should ALWAYS win
     pairs = _parse_kv_pairs(user_text)
     if len(pairs) >= 2:
         labels = [k for k, _ in pairs]
         values = [v for _, v in pairs]
-        chart_type = _detect_chart_type(user_text, default_type="pie")
-        cfg = _chart_config(chart_type, labels, values, dataset_label="Value")
+        cfg = _chart_config(chart_type if chart_type else "pie", labels, values, dataset_label="Value")
         return {
-            "messages": [AIMessage(content="Here is a Chart.js config:\n```json\n" + json.dumps(cfg, indent=2) + "\n```")],
+            "messages": [AIMessage(content=f"Here is your {chart_type} chart.")],
             "last_agent": "viz",
             "viz_config": cfg,
             "error": "",
         }
 
-    # 3) Parse points list
+    # 2) Explicit labels + values format
+    lv = _parse_labels_values(user_text)
+    if lv:
+        labels, values = lv
+        cfg = _chart_config(chart_type, labels, values, dataset_label="Value")
+        return {
+            "messages": [AIMessage(content=f"Here is your {chart_type} chart.")],
+            "last_agent": "viz",
+            "viz_config": cfg,
+            "error": "",
+        }
+
+    # 3) Explicit points list
     pts = _parse_points_list(user_text)
     if pts:
         labels = [str(i + 1) for i in range(len(pts))]
-        chart_type = _detect_chart_type(user_text, default_type="line")
-        cfg = _chart_config(chart_type, labels, pts, dataset_label="points")
+        cfg = _chart_config(chart_type if chart_type else "line", labels, pts, dataset_label="points")
         return {
-            "messages": [AIMessage(content="Here is a Chart.js config:\n```json\n" + json.dumps(cfg, indent=2) + "\n```")],
+            "messages": [AIMessage(content=f"Here is your {chart_type} chart.")],
             "last_agent": "viz",
             "viz_config": cfg,
             "error": "",
         }
 
-    # 4) If user mentions a table, try previewing it
+    # 4) Use sql_preview ONLY in the same SQL -> viz handoff turn
+    use_sql_preview = state.get("post_route") == "viz"
+    rows = state.get("sql_preview") or []
+    if use_sql_preview and rows:
+        inferred = _infer_from_rows(rows)
+        if inferred:
+            labels, values, ds_label = inferred
+            cfg = _chart_config(chart_type, labels, values, dataset_label=ds_label)
+            return {
+                "messages": [AIMessage(content=f"Here is your {chart_type} chart.")],
+                "last_agent": "viz",
+                "viz_config": cfg,
+                "error": "",
+            }
+
+    # 5) If user mentions a table directly, fetch it now
     table = None
     m1 = re.search(r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\b", user_text, re.I)
     m2 = re.search(r"\bin\s+([A-Za-z_][A-Za-z0-9_]*)\b", user_text, re.I)
     cand = (m1.group(1) if m1 else None) or (m2.group(1) if m2 else None)
     cand = _safe_table_name(cand) if cand else None
+
     if cand:
         fetched = _query_table_preview(cand)
         inferred2 = _infer_from_rows(fetched or [])
         if inferred2:
             labels, values, ds_label = inferred2
-            chart_type = _detect_chart_type(user_text, default_type="bar")
             cfg = _chart_config(chart_type, labels, values, dataset_label=ds_label)
             return {
-                "messages": [AIMessage(content="Here is a Chart.js config:\n```json\n" + json.dumps(cfg, indent=2) + "\n```")],
+                "messages": [AIMessage(content=f"Here is your {chart_type} chart.")],
                 "last_agent": "viz",
                 "viz_config": cfg,
                 "sql_preview": fetched,
@@ -211,7 +260,7 @@ def viz_node(state: SupervisorState) -> dict:
             }
 
     return {
-        "messages": [AIMessage(content="I couldn't detect chart data. Try:\n- `pie chart for A=30, B=70`\n- `line chart points: 1,3,2,5`\n- `bar chart of ages from demo_users`")],
+        "messages": [AIMessage(content="I couldn't detect chart data. Try asking for a chart and include values.")],
         "last_agent": "viz",
         "error": "",
     }

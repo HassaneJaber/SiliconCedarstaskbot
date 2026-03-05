@@ -1,5 +1,4 @@
 import uuid
-import json
 import chainlit as cl
 
 from project1.graphs.supervisor_graph import run_supervisor
@@ -50,9 +49,7 @@ async def on_message(message: cl.Message):
 
     route = out.get("route", "unknown")
     response = out.get("response", "")
-
     viz_cfg = out.get("viz_config")
-    sql_query = out.get("sql_query")
 
     elements = []
     if viz_cfg:
@@ -60,16 +57,12 @@ async def on_message(message: cl.Message):
         if fig is not None:
             elements.append(cl.Plotly(name="chart", figure=fig, display="inline"))
 
-    # Show SQL used (nice for debugging) + response
-    extra = ""
-    if sql_query:
-        extra += f"\n\n**SQL used**:\n```sql\n{sql_query}\n```"
+    content = f"*route:* `{route}`\n\n{response}"
 
-    # If no plotly, still show the Chart.js config that your agent generated
-    if viz_cfg and not elements:
-        extra += "\n\n**Chart config**:\n```json\n" + json.dumps(viz_cfg, indent=2) + "\n```"
+    if viz_cfg and go is None:
+        content += "\n\n_(Chart generated, but Plotly is not installed to render it in the UI.)_"
 
     await cl.Message(
-        content=f"*route:* `{route}`\n\n{response}{extra}",
+        content=content,
         elements=elements if elements else None,
     ).send()

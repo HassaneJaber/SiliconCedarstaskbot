@@ -14,6 +14,9 @@ class SupervisorState(TypedDict, total=False):
     last_agent: str
     error: str
 
+    # Generic same-run handoff
+    handoff_to: str   # "", "conversation", "rag", "sql", "viz", "research"
+
     # SQL outputs
     sql_query: str
     sql_preview: List[Dict[str, Any]]

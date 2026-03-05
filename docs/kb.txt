@@ -1,6 +1,10 @@
 LangGraph is a low-level orchestration framework for building long-running, stateful LLM workflows as graphs.
 You define nodes (steps) and edges (transitions), so execution can branch, loop, and resume with memory/persistence.
-It’s used to build reliable agent workflows (routing, tools, multi-step plans, human-in-the-loop, etc.).
-RAG (retrieval-augmented generation) retrieves relevant chunks from documents and gives them to the LLM as context.
-Memory in LangGraph is often done using a checkpointer and a thread_id to persist state across turns.
-LangSmith is LangChain’s platform for tracing, debugging, testing, and evaluating LLM applications. It supports runs/traces, datasets, and experiments (evaluations) to measure quality over prompts and model changes.
+It is used to build reliable agent workflows such as routing, tool use, multi-step plans, and human-in-the-loop systems.
+
+RAG (Retrieval-Augmented Generation) is a method where the system first retrieves relevant information from documents, then gives that retrieved context to the language model to produce a grounded answer.
+
+Memory in LangGraph is often implemented using a checkpointer and a thread_id to persist state across turns.
+
+LangSmith is LangChain’s platform for tracing, debugging, testing, and evaluating LLM applications.
+It supports runs/traces, datasets, and experiments (evaluations) to measure quality over prompts and model changes.
